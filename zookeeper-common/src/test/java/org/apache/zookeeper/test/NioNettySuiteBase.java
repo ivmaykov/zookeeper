@@ -18,9 +18,12 @@
 
 package org.apache.zookeeper.test;
 
+import org.apache.zookeeper.common.TestByteBufAllocator;
 import org.apache.zookeeper.server.NettyServerCnxnFactory;
 import org.apache.zookeeper.server.ServerCnxnFactory;
+import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.runner.RunWith;
 import org.junit.runners.Suite;
@@ -40,5 +43,16 @@ public class NioNettySuiteBase {
     @AfterClass
     public static void tearDown() {
         System.clearProperty(ServerCnxnFactory.ZOOKEEPER_SERVER_CNXN_FACTORY);
+    }
+
+    @Before
+    public void setUpTest() {
+        NettyServerCnxnFactory.setTestAllocator(TestByteBufAllocator.getInstance());
+    }
+
+    @After
+    public void tearDownTest() {
+        NettyServerCnxnFactory.clearTestAllocator();
+        TestByteBufAllocator.checkForLeaks();
     }
 }

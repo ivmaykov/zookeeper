@@ -59,9 +59,11 @@
     <dependency org="org.apache.yetus" name="audience-annotations"
                 rev="${audience-annotations.version}"/>
 
-    <dependency org="io.netty" name="netty" conf="default" rev="${netty.version}">
-      <artifact name="netty" type="jar" conf="default"/>
-    </dependency>
+    <dependency org="io.netty" name="netty-common" conf="default" rev="${netty.version}" />
+    <dependency org="io.netty" name="netty-buffer" conf="default" rev="${netty.version}" />
+    <dependency org="io.netty" name="netty-transport" conf="default" rev="${netty.version}" />
+    <dependency org="io.netty" name="netty-handler" conf="default" rev="${netty.version}" />
+    <dependency org="io.netty" name="netty-codec" conf="default" rev="${netty.version}" />
 
     <dependency org="com.googlecode.json-simple" name="json-simple" rev="${json.version}" >
       <exclude org="junit" module="junit"/>
