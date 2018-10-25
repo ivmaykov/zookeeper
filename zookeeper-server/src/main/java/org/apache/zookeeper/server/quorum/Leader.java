@@ -42,7 +42,6 @@ import java.util.concurrent.ConcurrentMap;
 import javax.security.sasl.SaslException;
 
 import org.apache.zookeeper.ZooDefs.OpCode;
-import org.apache.zookeeper.common.QuorumX509Util;
 import org.apache.zookeeper.common.Time;
 import org.apache.zookeeper.common.X509Exception;
 import org.apache.zookeeper.server.FinalRequestProcessor;
@@ -234,21 +233,16 @@ public class Leader {
 
     private final ServerSocket ss;
 
-    Leader(QuorumPeer self,LeaderZooKeeperServer zk) throws IOException, X509Exception {
+    Leader(QuorumPeer self,LeaderZooKeeperServer zk) throws IOException {
         this.self = self;
         this.proposalStats = new BufferStats();
         try {
-            if (self.shouldUsePortUnification()) {
+            if (self.shouldUsePortUnification() || self.isSslQuorum()) {
+                boolean allowInsecureConnection = self.shouldUsePortUnification();
                 if (self.getQuorumListenOnAllIPs()) {
-                    ss = new UnifiedServerSocket(new QuorumX509Util(), self.getQuorumAddress().getPort());
+                    ss = new UnifiedServerSocket(self.getX509Util(), allowInsecureConnection, self.getQuorumAddress().getPort());
                 } else {
-                    ss = new UnifiedServerSocket(new QuorumX509Util());
-                }
-            } else if (self.isSslQuorum()) {
-                if (self.getQuorumListenOnAllIPs()) {
-                    ss = new QuorumX509Util().createSSLServerSocket(self.getQuorumAddress().getPort());
-                } else {
-                    ss = new QuorumX509Util().createSSLServerSocket();
+                    ss = new UnifiedServerSocket(self.getX509Util(), allowInsecureConnection);
                 }
             } else {
                 if (self.getQuorumListenOnAllIPs()) {
@@ -261,9 +255,6 @@ public class Leader {
             if (!self.getQuorumListenOnAllIPs()) {
                 ss.bind(self.getQuorumAddress());
             }
-        } catch (X509Exception e) {
-            LOG.error("Failed to setup ssl server socket", e);
-            throw e;
         } catch (BindException e) {
             if (self.getQuorumListenOnAllIPs()) {
                 LOG.error("Couldn't bind to port " + self.getQuorumAddress().getPort(), e);
@@ -399,8 +390,10 @@ public class Leader {
         public void run() {
             try {
                 while (!stop) {
-                    try{
-                        Socket s = ss.accept();
+                    Socket s = null;
+                    boolean error = false;
+                    try {
+                        s = ss.accept();
 
                         // start with the initLimit, once the ack is processed
                         // in LearnerHandler switch to the syncLimit
@@ -412,6 +405,7 @@ public class Leader {
                         LearnerHandler fh = new LearnerHandler(s, is, Leader.this);
                         fh.start();
                     } catch (SocketException e) {
+                        error = true;
                         if (stop) {
                             LOG.info("exception while shutting down acceptor: "
                                     + e);
@@ -425,6 +419,19 @@ public class Leader {
                         }
                     } catch (SaslException e){
                         LOG.error("Exception while connecting to quorum learner", e);
+                        error = true;
+                    } catch (Exception e) {
+                        error = true;
+                        throw e;
+                    } finally {
+                        // Don't leak sockets on errors
+                        if (error && s != null && !s.isClosed()) {
+                            try {
+                                s.close();
+                            } catch (IOException e) {
+                                LOG.warn("Error closing socket", e);
+                            }
+                        }
                     }
                 }
             } catch (Exception e) {
