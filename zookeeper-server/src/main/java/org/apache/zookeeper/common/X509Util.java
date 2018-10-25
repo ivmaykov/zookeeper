@@ -18,6 +18,9 @@
 package org.apache.zookeeper.common;
 
 
+import org.apache.zookeeper.common.X509Exception.KeyManagerException;
+import org.apache.zookeeper.common.X509Exception.SSLContextException;
+import org.apache.zookeeper.common.X509Exception.TrustManagerException;
 import org.apache.zookeeper.util.PemReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +44,10 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.Socket;
 import java.security.InvalidAlgorithmParameterException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardWatchEventKinds;
+import java.nio.file.WatchEvent;
 import java.security.GeneralSecurityException;
 import java.security.KeyManagementException;
 import java.security.KeyStore;
@@ -54,10 +61,7 @@ import java.security.cert.X509CertSelector;
 import java.util.Arrays;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
-
-import org.apache.zookeeper.common.X509Exception.KeyManagerException;
-import org.apache.zookeeper.common.X509Exception.SSLContextException;
-import org.apache.zookeeper.common.X509Exception.TrustManagerException;
+import java.util.function.Consumer;
 
 /**
  * Utility code for X509 handling
@@ -144,6 +148,8 @@ public abstract class X509Util {
     private String[] cipherSuites;
 
     private AtomicReference<SSLContext> defaultSSLContext = new AtomicReference<>(null);
+    private FileChangeWatcher keyStoreFileWatcher;
+    private FileChangeWatcher trustStoreFileWatcher;
 
     public X509Util() {
         String cipherSuitesInput = System.getProperty(cipherSuitesProperty);
@@ -221,6 +227,11 @@ public abstract class X509Util {
             }
         }
         return result;
+    }
+
+    private void resetDefaultSSLContext() throws X509Exception.SSLContextException {
+        SSLContext newContext = createSSLContext();
+        defaultSSLContext.set(newContext);
     }
 
     private SSLContext createSSLContext() throws SSLContextException {
@@ -543,5 +554,110 @@ public abstract class X509Util {
             }
         }
         throw new IOException("Unable to auto-detect store file type from file name: " + filename);
+    }
+
+    /**
+     * Enables automatic reloading of the trust store and key store files when they change on disk.
+     *
+     * @throws IOException if creating the FileChangeWatcher objects fails.
+     */
+    public void enableCertFileReloading() throws IOException {
+        ZKConfig config = new ZKConfig();
+        String keyStoreLocation = config.getProperty(sslKeystoreLocationProperty);
+        if (keyStoreLocation != null && !keyStoreLocation.isEmpty()) {
+            final Path filePath = Paths.get(keyStoreLocation).toAbsolutePath();
+            FileChangeWatcher newKeyStoreFileWatcher = new FileChangeWatcher(
+                    filePath.getParent(),
+                    new Consumer<WatchEvent<?>>() {
+                        @Override
+                        public void accept(WatchEvent<?> watchEvent) {
+                            handleWatchEvent(filePath, watchEvent);
+                        }
+                    });
+            // stop old watcher if there is one
+            if (keyStoreFileWatcher != null) {
+                keyStoreFileWatcher.stop();
+                keyStoreFileWatcher = newKeyStoreFileWatcher;
+            }
+        }
+        String trustStoreLocation = config.getProperty(sslTruststoreLocationProperty);
+        if (trustStoreLocation != null && !trustStoreLocation.isEmpty()) {
+            final Path filePath = Paths.get(trustStoreLocation).toAbsolutePath();
+            FileChangeWatcher newTrustStoreFileWatcher = new FileChangeWatcher(
+                    filePath.getParent(),
+                    new Consumer<WatchEvent<?>>() {
+                        @Override
+                        public void accept(WatchEvent<?> watchEvent) {
+                            handleWatchEvent(filePath, watchEvent);
+                        }
+                    });
+            // stop old watcher if there is one
+            if (trustStoreFileWatcher != null) {
+                trustStoreFileWatcher.stop();
+                trustStoreFileWatcher = newTrustStoreFileWatcher;
+            }
+        }
+    }
+
+    /**
+     * Disables automatic reloading of the trust store and key store files when they change on disk.
+     * Stops background threads and closes WatchService instances.
+     */
+    public void disableCertFileReloading() {
+        if (keyStoreFileWatcher != null) {
+            keyStoreFileWatcher.stop();
+            keyStoreFileWatcher = null;
+        }
+        if (trustStoreFileWatcher != null) {
+            trustStoreFileWatcher.stop();
+            trustStoreFileWatcher = null;
+        }
+    }
+
+    // Finalizer guardian object, see Effective Java item 7
+    @SuppressWarnings("unused")
+    private final Object finalizerGuardian = new Object() {
+        @Override
+        protected void finalize() {
+            disableCertFileReloading();
+        }
+    };
+
+    /**
+     * Handler for watch events that let us know a file we may care about has changed on disk.
+     *
+     * @param filePath the path to the file we are watching for changes.
+     * @param event    the WatchEvent.
+     */
+    private void handleWatchEvent(Path filePath, WatchEvent<?> event) {
+        boolean shouldResetContext = false;
+        Path dirPath = filePath.getParent();
+        if (event.kind().equals(StandardWatchEventKinds.OVERFLOW)) {
+            // If we get notified about possibly missed events, reload the key store / trust store just to be sure.
+            shouldResetContext = true;
+        } else if (event.kind().equals(StandardWatchEventKinds.ENTRY_MODIFY) ||
+                event.kind().equals(StandardWatchEventKinds.ENTRY_CREATE)) {
+            Path eventFilePath = dirPath.resolve((Path) event.context());
+            if (filePath.equals(eventFilePath)) {
+                shouldResetContext = true;
+            }
+        }
+        // Note: we don't care about delete events
+        if (shouldResetContext) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Attempting to reset default SSL context after receiving watch event: " +
+                        event.kind() + " with context: " + event.context());
+            }
+            try {
+                this.resetDefaultSSLContext();
+            } catch (SSLContextException e) {
+                throw new RuntimeException(e);
+            }
+        } else {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Ignoring watch event and keeping previous default SSL context. Event kind: " +
+                        event.kind() + " with context: " + event.context());
+            }
+        }
     }
 }

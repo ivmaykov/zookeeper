@@ -202,6 +202,9 @@ public class QuorumPeerMain {
           quorumPeer.setLearnerType(config.getPeerType());
           quorumPeer.setSyncEnabled(config.getSyncEnabled());
           quorumPeer.setQuorumListenOnAllIPs(config.getQuorumListenOnAllIPs());
+          if (config.sslQuorumReloadCertFiles) {
+              quorumPeer.getX509Util().enableCertFileReloading();
+          }
 
           // sets quorum sasl authentication configurations
           quorumPeer.setQuorumSaslEnabled(config.quorumEnableSasl);
